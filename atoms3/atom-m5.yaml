@@ -1,7 +1,7 @@
 substitutions:
-  name: "atom-s3"
-  friendly_name: "M5Stack Atom S3 bt proxy + cn105"
-  clim_name: Clim Sejour
+  name: "ac_livingroom"
+  friendly_name: "AC Livingroom"
+  clim_name: Climate AC Livingroom
 
 esphome:
   name: ${name}
@@ -9,7 +9,7 @@ esphome:
   min_version: 2025.11.0
   #name_add_mac_suffix: true
   project:
-    name: esphome.clim_and_nt_proxy
+    name: esphome.climate
     version: "25.12.6"
   
   # on_boot:
@@ -67,8 +67,8 @@ logger:
     esp32_ble_client: INFO
     esp-idf: INFO
     OPERATING_STATUS: DEBUG
-    # Nouveaux tags pour HEAT_COOL / AUTO dual setpoint
-    HEAT_COOL: DEBUG  # Traces détaillées consigne glissante et mode AUTO/HEAT_COOL
+    # New tags for HEAT_COOL / AUTO dual setpoint
+    HEAT_COOL: DEBUG  # Detailed traces for AUTO/HEAT COOL
     DUAL_SP: DEBUG    # Traces dual setpoint AUTO mode
     TEMP_SENSOR: INFO
     UARTFix: WARN
