@@ -1,4 +1,4 @@
-mqtt: !include mqtt-config.yaml
+#mqtt: !include mqtt-config.yaml
 api: !include api-config.yaml
 
 ota:
