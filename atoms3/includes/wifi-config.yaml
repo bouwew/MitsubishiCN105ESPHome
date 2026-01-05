@@ -1,6 +1,15 @@
-use_address: 192.168.1.109
+# use_address: 192.168.1.109
+
+# Optional manual IP
+manual_ip:
+  static_ip: 192.168.0.109
+  gateway: 192.168.0.1
+  subnet: 255.255.255.0
+
 networks:
-- ssid: !secret wifi_ssid
+- ssid: "Bouwew4"
+  password: !secret wifi_password
+- ssid: "Bouwew5"
   password: !secret wifi_password
 
 # Enable fallback hotspot (captive portal) in case wifi connection fails
