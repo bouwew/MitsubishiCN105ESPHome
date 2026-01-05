@@ -81,8 +81,6 @@ logger:
 
 # displays infos on atom screen
 <<: !include includes/display_config.yaml
-# configure esp bluetooth proxy
-<<: !include includes/bt-proxy-config.yaml
 
 # cn105 mitsubishi climate config
 <<: !include includes/climate-config.yaml
