@@ -21,17 +21,12 @@ esphome:
 
 esp32:
   board: esp32-s3-devkitc-1
-
-  #board: m5stack-cores3
-  #variant: ESP32S3
   framework:
     #type: arduino
     type: esp-idf
     version: recommended
     #version: 5.4.0
   flash_size: 8MB
-
-
 
 debug:
   update_interval: 5s
