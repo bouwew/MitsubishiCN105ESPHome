@@ -1,4 +1,6 @@
 #include "cn105.h"
+#include <algorithm>
+#include <esphome/core/helpers.h>
 
 using namespace esphome;
 
@@ -34,14 +36,29 @@ void CN105Climate::set_vertical_vane_select(
 }
 
 void CN105Climate::set_horizontal_vane_select(
-    VaneOrientationSelect* horizontal_vane_select) {
+    VaneOrientationSelect* horizontal_vane_select, const std::vector<std::string>& options) {
     this->horizontal_vane_select_ = horizontal_vane_select;
 
-    // builds option list from SwiCago wideVaneMap
-    this->horizontal_vane_select_->traits.set_options({
-        WIDEVANE_MAP[0], WIDEVANE_MAP[1], WIDEVANE_MAP[2], WIDEVANE_MAP[3],
-        WIDEVANE_MAP[4], WIDEVANE_MAP[5], WIDEVANE_MAP[6], WIDEVANE_MAP[7]
-        });
+    // Use provided options if not empty, and filter out any options that are not in WIDEVANE_MAP to ensure validity,
+    // otherwise use all options from WIDEVANE_MAP
+    if (!options.empty()) {
+        this->horizontal_vane_options_strings_.clear();
+        for (const auto& option : options) {
+            if (std::find(std::begin(WIDEVANE_MAP), std::end(WIDEVANE_MAP), option) != std::end(WIDEVANE_MAP)) {
+                this->horizontal_vane_options_strings_.push_back(option);
+            }
+        }
+    } else {
+        this->horizontal_vane_options_strings_.assign(std::begin(WIDEVANE_MAP), std::end(WIDEVANE_MAP));
+    }
+
+    // Build FixedVector of const char* for set_options
+    FixedVector<const char*> fixedOptions;
+    fixedOptions.init(this->horizontal_vane_options_strings_.size());
+    for (const auto& str : this->horizontal_vane_options_strings_) {
+        fixedOptions.push_back(str.c_str());
+    }
+    this->horizontal_vane_select_->traits.set_options(fixedOptions);
 
     this->horizontal_vane_select_->setCallbackFunction([this](const char* setting) {
         ESP_LOGD("EVT", "wideVane.control() -> Demande un chgt de réglage de la wideVane: %s", setting);
@@ -208,8 +225,24 @@ void CN105Climate::set_hp_uptime_connection_sensor(uptime::HpUpTimeConnectionSen
     this->hp_uptime_connection_sensor_ = hp_up_connection_sensor;
 }
 
-void CN105Climate::set_use_fahrenheit_support_mode(bool value) {
-    this->use_fahrenheit_support_mode_ = value;
-    this->fahrenheitSupport_.setUseFahrenheitSupportMode(value);
-    ESP_LOGI(TAG, "Fahrenheit compatibility mode enabled: %s", value ? "true" : "false");
+void CN105Climate::set_use_fahrenheit_support_mode(FahrenheitMode mode) {
+    this->fahrenheitSupport_.setUseFahrenheitSupportMode(mode);
+    const char* mode_name = (mode == FahrenheitMode::OFF) ? "disabled" :
+                           (mode == FahrenheitMode::STANDARD) ? "standard" : "alt";
+    ESP_LOGI(TAG, "Fahrenheit compatibility mode: %s", mode_name);
+}
+
+void CN105Climate::add_hardware_setting(HardwareSettingSelect* setting) {
+    this->hardware_settings_.push_back(setting);
+    setting->setCallbackFunction([this, setting](const std::string& value, int int_value) {
+        ESP_LOGI(LOG_FUNCTIONS_TAG, "Hardware setting change: Code %d -> %d (%s)", setting->get_code(), int_value, value.c_str());
+
+        // Optimistic update done in component
+
+        // Update internal structure
+        this->functions.setValue(setting->get_code(), int_value);
+
+        // Trigger write to device
+        this->setFunctions(this->functions);
+        });
 }

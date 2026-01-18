@@ -92,6 +92,12 @@ bool CN105Climate::checkSum() {
         ESP_LOGD("chkSum", "OK-> %02X=%02X ", processedCS, packetCheckSum);
     } else {
         ESP_LOGW("chkSum", "KO-> %02X!=%02X ", processedCS, packetCheckSum);
+        // Pendant le handshake, une erreur de checksum est un signal utile: logguer la trame sous CN105_CONN
+        if (!this->isHeatpumpConnected_) {
+            ESP_LOGD(LOG_CONN_TAG, "Checksum KO during handshake (computed=%02X packet=%02X, cmd=0x%02X len=%d)",
+                processedCS, packetCheckSum, this->command, this->dataLength);
+            this->hpPacketDebug(this->storedInputData, this->bytesRead + 1, LOG_CONN_TAG);
+        }
     }
 
     return (packetCheckSum == processedCS);
@@ -130,6 +136,13 @@ void CN105Climate::processDataPacket() {
     this->data = &this->storedInputData[5];
 
     this->hpPacketDebug(this->storedInputData, this->bytesRead + 1, "READ");
+
+    // Pendant le handshake (tant que non connecté), logguer toute trame RX sous CN105_CONN en DEBUG
+    // afin de faciliter le diagnostic (0x7A/0x7B attendus, ou autre réponse inattendue).
+    if (!this->isHeatpumpConnected_) {
+        ESP_LOGD(LOG_CONN_TAG, "RX during handshake (cmd=0x%02X len=%d)", this->command, this->dataLength);
+        this->hpPacketDebug(this->storedInputData, this->bytesRead + 1, LOG_CONN_TAG);
+    }
 
     if (this->checkSum()) {
         // checkPoint of a heatpump response
@@ -217,9 +230,6 @@ void CN105Climate::getSettingsFromResponsePacket() {
     } else {
         receivedSettings.temperature = lookupByteMapValue(TEMP_MAP, TEMP, 16, data[5], "temperature reading");
     }
-    if (use_fahrenheit_support_mode_) {
-        receivedSettings.temperature = this->fahrenheitSupport_.normalizeCelsiusForConversionToFahrenheit(receivedSettings.temperature);
-    }
 
     ESP_LOGD("Decoder", "[Temp °C: %f]", receivedSettings.temperature);
 
@@ -285,9 +295,6 @@ void CN105Climate::getRoomTemperatureFromResponsePacket() {
 
     if (data[5] > 1) {
         receivedStatus.outsideAirTemperature = (data[5] - 128) / 2.0f;
-        if (use_fahrenheit_support_mode_) {
-            receivedStatus.outsideAirTemperature = this->fahrenheitSupport_.normalizeCelsiusForConversionToFahrenheit(receivedStatus.outsideAirTemperature);
-        }
     } else {
         receivedStatus.outsideAirTemperature = NAN;
     }
@@ -300,9 +307,6 @@ void CN105Climate::getRoomTemperatureFromResponsePacket() {
     } else {
         receivedStatus.roomTemperature = lookupByteMapValue(ROOM_TEMP_MAP, ROOM_TEMP, 32, data[3]);
         ESP_LOGD(LOG_TEMP_SENSOR_TAG, "data[3] map --> [Room °C : %f]", receivedStatus.roomTemperature);
-    }
-    if (use_fahrenheit_support_mode_) {
-        receivedStatus.roomTemperature = this->fahrenheitSupport_.normalizeCelsiusForConversionToFahrenheit(receivedStatus.roomTemperature);
     }
 
     receivedStatus.runtimeHours = float((data[11] << 16) | (data[12] << 8) | data[13]) / 60;
@@ -406,7 +410,7 @@ void CN105Climate::getDataFromResponsePacket() {
 
     // D'abord, laissons l'orchestrateur traiter les codes connus
     const uint8_t code = this->data[0];
-    if (this->processInfoResponse(code)) {
+    if (this->scheduler_.process_response(code)) {
         return;
     }
     // Sinon, switch pour les cas non gérés par l'orchestrateur
@@ -479,8 +483,13 @@ void CN105Climate::processCommand() {
     case 0x62:  /* packet contains data (room °C, settings, timer, status, or functions...)*/
         this->getDataFromResponsePacket();
         break;
-    case 0x7a:
-        ESP_LOGI(TAG, "--> Heatpump did reply: connection success! <--");
+    case 0x7a:  // Connection success (User / standard)
+    case 0x7b:  // Connection success (Installer / extended)
+        // Log en INFO sur le tag dédié, détails en DEBUG via hpPacketDebug
+        ESP_LOGI(LOG_CONN_TAG, "--> Heatpump did reply: connection success (%s, 0x%02X)! <--",
+            (this->command == 0x7b) ? "Installer" : "User",
+            this->command);
+        this->hpPacketDebug(this->storedInputData, this->bytesRead + 1, LOG_CONN_TAG);
         //this->isHeatpumpConnected_ = true;
         this->setHeatpumpConnected(true);
         // let's say that the last complete cycle was over now
@@ -508,7 +517,10 @@ void CN105Climate::statusChanged(heatpumpStatus status) {
         this->currentStatus.runtimeHours = status.runtimeHours;
         this->currentStatus.roomTemperature = status.roomTemperature;
         this->currentStatus.outsideAirTemperature = status.outsideAirTemperature;
-        this->current_temperature = currentStatus.roomTemperature;
+        this->setCurrentTemperature(this->currentStatus.roomTemperature);
+
+        // Check deadband in HEAT_COOL mode and send command if needed
+        this->checkDeadbandAndSend();
 
         this->updateAction();       // update action info on HA climate component
         this->publish_state();
@@ -530,7 +542,7 @@ void CN105Climate::statusChanged(heatpumpStatus status) {
         }
 
         if (this->outside_air_temperature_sensor_ != nullptr) {
-            this->outside_air_temperature_sensor_->publish_state(currentStatus.outsideAirTemperature);
+            this->outside_air_temperature_sensor_->publish_state(this->fahrenheitSupport_.normalizeHeatpumpTemperatureToUiTemperature(currentStatus.outsideAirTemperature));
         }
     } // else no change
 }
@@ -740,7 +752,9 @@ void CN105Climate::checkPowerAndModeSettings(heatpumpSettings& settings, bool up
             } else if (strcmp(settings.mode, "FAN") == 0) {
                 this->mode = climate::CLIMATE_MODE_FAN_ONLY;
             } else if (strcmp(settings.mode, "AUTO") == 0) {
-                this->mode = climate::CLIMATE_MODE_AUTO;
+                // Map Mitsubishi AUTO to HEAT_COOL for Home Assistant
+                // HEAT_COOL mode properly supports dual setpoints in HA UI
+                this->mode = climate::CLIMATE_MODE_HEAT_COOL;
             } else {
                 ESP_LOGW(
                     TAG,

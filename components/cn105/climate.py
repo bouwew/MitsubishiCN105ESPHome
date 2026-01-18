@@ -58,6 +58,7 @@ AUTO_LOAD = [
 DEPENDENCIES = ["uart", "uptime"]  # Garder uart ici aussi
 
 CONF_SUPPORTS = "supports"
+CONF_SUPPORTS_HORIZONTAL_VANE_MODE = "horizontal_vane_mode"
 CONF_HORIZONTAL_SWING_SELECT = "horizontal_vane_select"
 CONF_VERTICAL_SWING_SELECT = "vertical_vane_select"
 CONF_COMPRESSOR_FREQUENCY_SENSOR = "compressor_frequency_sensor"
@@ -81,13 +82,24 @@ CONF_AIRFLOW_CONTROL_SELECT = "airflow_control_select"
 CONF_AIR_PURIFIER_SWITCH = "air_purifier_switch"
 CONF_NIGHT_MODE_SWITCH = "night_mode_switch"
 CONF_CIRCULATOR_SWITCH = "circulator_switch"
+CONF_HARDWARE_SETTINGS = "hardware_settings"
+CONF_CODE = "code"
+CONF_OPTIONS = "options"
 
 # Support explicite du DUAL setpoint via YAML
 CONF_DUAL_SETPOINT = "dual_setpoint"
 
-DEFAULT_CLIMATE_MODES = ["AUTO", "COOL", "HEAT", "DRY", "FAN_ONLY"]
+DEFAULT_CLIMATE_MODES = ["HEAT_COOL", "COOL", "HEAT", "DRY", "FAN_ONLY"]
 DEFAULT_FAN_MODES = ["AUTO", "MIDDLE", "QUIET", "LOW", "MEDIUM", "HIGH"]
 DEFAULT_SWING_MODES = ["OFF", "VERTICAL", "HORIZONTAL", "BOTH"]
+
+FAHRENHEIT_MODES = {
+    "disabled": 0,
+    "standard": 1,
+    "alt": 2,
+    "false": 0,
+    "true": 1,
+}
 
 
 CN105Climate = cg.global_ns.class_(
@@ -95,6 +107,8 @@ CN105Climate = cg.global_ns.class_(
 )
 CONF_REMOTE_TEMP_TIMEOUT = "remote_temperature_timeout"
 CONF_DEBOUNCE_DELAY = "debounce_delay"
+CONF_CONNECTION_BOOTSTRAP_DELAY = "connection_bootstrap_delay"
+CONF_INSTALLER_MODE = "installer_mode"
 
 # Définitions des classes C++ (identiques à votre version)
 VaneOrientationSelect = cg.global_ns.class_(
@@ -130,6 +144,9 @@ FlowControlSensor = cg.global_ns.class_(
     "FlowControlSensor", text_sensor.TextSensor, cg.Component
 )
 HVACOptionSwitch = cg.global_ns.class_("HVACOptionSwitch", switch.Switch, cg.Component)
+HardwareSettingSelect = cg.global_ns.class_(
+    "HardwareSettingSelect", select.Select, cg.Component
+)
 
 
 # --- Fonction d'aide pour récupérer les pins TX/RX (identique à votre version corrigée) ---
@@ -237,6 +254,24 @@ HVAC_OPTION_SWITCH_SCHEMA = switch.switch_schema(HVACOptionSwitch).extend(
     {cv.GenerateID(CONF_ID): cv.declare_id(HVACOptionSwitch)}
 )
 
+HARDWARE_SETTING_ITEM_SCHEMA = select.select_schema(HardwareSettingSelect).extend(
+    {
+        cv.Required(CONF_CODE): cv.int_range(min=101, max=128),
+        cv.Required(CONF_OPTIONS): cv.Schema({cv.int_range(min=1, max=3): cv.string}),
+    }
+)
+
+CONF_HARDWARE_SETTINGS_LIST = "list"
+
+HARDWARE_SETTING_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_UPDATE_INTERVAL, default="24h"): cv.update_interval,
+        cv.Required(CONF_HARDWARE_SETTINGS_LIST): cv.ensure_list(
+            HARDWARE_SETTING_ITEM_SCHEMA
+        ),
+    }
+)
+
 CONFIG_SCHEMA = (
     climate.climate_schema(CN105Climate)
     .extend(
@@ -268,7 +303,9 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_FUNCTIONS_SET_BUTTON): FUNCTIONS_BUTTON_SCHEMA,
             cv.Optional(CONF_FUNCTIONS_SET_CODE): FUNCTIONS_NUMBER_SCHEMA,
             cv.Optional(CONF_FUNCTIONS_SET_VALUE): FUNCTIONS_NUMBER_SCHEMA,
-            cv.Optional(CONF_FAHRENHEIT_SUPPORT_MODE): cv.boolean,
+            cv.Optional(CONF_FAHRENHEIT_SUPPORT_MODE, default="disabled"): cv.enum(
+                FAHRENHEIT_MODES, lower=True
+            ),
             cv.Optional(
                 CONF_STAGE_SENSOR
             ): STAGE_SENSOR_CONFIG_SCHEMA,  # Modifié pour le nouveau schéma
@@ -280,6 +317,10 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_DEBOUNCE_DELAY, default="100ms"): cv.All(
                 cv.update_interval
             ),
+            cv.Optional(CONF_CONNECTION_BOOTSTRAP_DELAY, default="10s"): cv.All(
+                cv.update_interval
+            ),
+            cv.Optional(CONF_INSTALLER_MODE, default=False): cv.boolean,
             cv.Optional(
                 CONF_HP_UP_TIME_CONNECTION_SENSOR
             ): HP_UP_TIME_CONNECTION_SENSOR_SCHEMA,
@@ -287,6 +328,7 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_AIR_PURIFIER_SWITCH): HVAC_OPTION_SWITCH_SCHEMA,
             cv.Optional(CONF_NIGHT_MODE_SWITCH): HVAC_OPTION_SWITCH_SCHEMA,
             cv.Optional(CONF_CIRCULATOR_SWITCH): HVAC_OPTION_SWITCH_SCHEMA,
+            cv.Optional(CONF_HARDWARE_SETTINGS): HARDWARE_SETTING_SCHEMA,
             cv.Optional(CONF_SUPPORTS, default={}): cv.Schema(
                 {
                     cv.Optional(
@@ -299,6 +341,9 @@ CONFIG_SCHEMA = (
                         CONF_SWING_MODE, default=DEFAULT_SWING_MODES
                     ): cv.ensure_list(climate.validate_climate_swing_mode),
                     cv.Optional(CONF_DUAL_SETPOINT, default=False): cv.boolean,
+                    cv.Optional(CONF_SUPPORTS_HORIZONTAL_VANE_MODE): cv.ensure_list(
+                        cv.string
+                    ),
                 }
             ),
         }
@@ -313,6 +358,8 @@ def to_code(config):
     uart_var = yield cg.get_variable(uart_id_object)
     var = cg.new_Pvariable(config[CONF_ID], uart_var)
 
+    cg.add(var.set_installer_mode(config[CONF_INSTALLER_MODE]))
+
     cg.add(uart_var.set_data_bits(8))
     cg.add(uart_var.set_parity(UARTParityOptions.UART_CONFIG_PARITY_EVEN))
     cg.add(uart_var.set_stop_bits(1))
@@ -323,16 +370,26 @@ def to_code(config):
     uart_port_index = get_uart_port_index(CORE.config, uart_id_str_for_lookup)
     cg.add(var.set_uart_port(uart_port_index))
 
+    # Empty list means use all options from WIDEVANE_MAP (C++ is source of truth)
+    horizontal_vane_options = []
+
     if CONF_SUPPORTS in config:
         supports = config[CONF_SUPPORTS]
         traits = var.config_traits()
+
         # Configurer les modes supportés
         supported_modes = supports.get(CONF_MODE, DEFAULT_CLIMATE_MODES)
         for mode_str in supported_modes:
             if mode_str == "OFF":
                 continue
-            if mode_str in climate.CLIMATE_MODES:
-                cg.add(traits.add_supported_mode(climate.CLIMATE_MODES[mode_str]))
+            # Map AUTO to HEAT_COOL for Home Assistant compatibility
+            # HEAT_COOL mode natively supports dual setpoints in HA
+            effective_mode = "HEAT_COOL" if mode_str == "AUTO" else mode_str
+            if effective_mode in climate.CLIMATE_MODES:
+                cg.add(traits.add_supported_mode(climate.CLIMATE_MODES[effective_mode]))
+
+        # Configure the horizontal vane options
+        horizontal_vane_options = supports.get(CONF_SUPPORTS_HORIZONTAL_VANE_MODE, [])
 
         # Définir le support du dual setpoint via YAML (par défaut: False si absent)
         yaml_dual = supports.get(CONF_DUAL_SETPOINT, False)
@@ -363,13 +420,26 @@ def to_code(config):
 
     cg.add(var.set_remote_temp_timeout(config[CONF_REMOTE_TEMP_TIMEOUT]))
     cg.add(var.set_debounce_delay(config[CONF_DEBOUNCE_DELAY]))
+    cg.add(
+        var.set_connection_bootstrap_delay(
+            int(config[CONF_CONNECTION_BOOTSTRAP_DELAY].total_milliseconds)
+        )
+    )
 
     # --- Configuration des entités optionnelles (style original) ---
     if CONF_HORIZONTAL_SWING_SELECT in config:
         conf_item = config[CONF_HORIZONTAL_SWING_SELECT]
         # new_select s'occupe de l'enregistrement. options=[] est important.
         swing_select_var = yield select.new_select(conf_item, options=[])
-        cg.add(var.set_horizontal_vane_select(swing_select_var))
+        if horizontal_vane_options:
+            options_vector = cg.RawExpression(
+                "std::vector<std::string>{"
+                + ", ".join([f'"{opt}"' for opt in horizontal_vane_options])
+                + "}"
+            )
+        else:
+            options_vector = cg.RawExpression("std::vector<std::string>{}")
+        cg.add(var.set_horizontal_vane_select(swing_select_var, options_vector))
 
     if CONF_VERTICAL_SWING_SELECT in config:
         conf_item = config[CONF_VERTICAL_SWING_SELECT]
@@ -464,12 +534,13 @@ def to_code(config):
         switch_var = yield switch.new_switch(config[CONF_CIRCULATOR_SWITCH])
         cg.add(var.set_circulator_switch(switch_var))
 
-    if CONF_FAHRENHEIT_SUPPORT_MODE in config:
-        cg.add(
-            var.set_use_fahrenheit_support_mode(
-                config.get(CONF_FAHRENHEIT_SUPPORT_MODE)
-            )
-        )
+    # Set Fahrenheit compatibility mode (cast int to FahrenheitMode enum)
+    # The enum validator returns the integer value from FAHRENHEIT_MODES dict
+    fahrenheit_mode = config.get(CONF_FAHRENHEIT_SUPPORT_MODE)
+    # Ensure it's an integer (enum validator should already return int, but be explicit)
+    fahrenheit_value = int(fahrenheit_mode) if isinstance(fahrenheit_mode, int) else FAHRENHEIT_MODES.get(str(fahrenheit_mode).lower(), 0)
+    mode_enum = cg.RawExpression(f"static_cast<esphome::FahrenheitMode>({fahrenheit_value})")
+    cg.add(var.set_use_fahrenheit_support_mode(mode_enum))
 
     # --- TRAITEMENT POUR STAGE_SENSOR AVEC LA NOUVELLE OPTION ---
     if CONF_STAGE_SENSOR in config:
@@ -498,6 +569,34 @@ def to_code(config):
         hp_connection_sensor_ = yield sensor.new_sensor(conf)
         yield cg.register_component(hp_connection_sensor_, conf)
         cg.add(var.set_hp_uptime_connection_sensor(hp_connection_sensor_))
+
+    if CONF_HARDWARE_SETTINGS in config:
+        hw_config = config[CONF_HARDWARE_SETTINGS]
+
+        # Extract and set the update interval
+        interval_ms = int(hw_config[CONF_UPDATE_INTERVAL].total_milliseconds)
+        cg.add(var.set_hardware_settings_interval(interval_ms))
+
+        # Iterate over the list of hardware settings
+        for setting_conf in hw_config[CONF_HARDWARE_SETTINGS_LIST]:
+            code = setting_conf[CONF_CODE]
+            options_map = setting_conf[CONF_OPTIONS]
+
+            # Build inline initializer list for std::map: {{key1, "val1"}, {key2, "val2"}, ...}
+            map_entries = ", ".join(
+                [f'{{{val}, "{label}"}}' for val, label in options_map.items()]
+            )
+            map_expr = cg.RawExpression(f"std::map<int, std::string>{{{map_entries}}}")
+
+            setting_var = cg.new_Pvariable(setting_conf[CONF_ID], code, map_expr)
+
+            # Extract options list sorted by key (1, 2, 3...) to ensure consistent order
+            options_list = [options_map[k] for k in sorted(options_map.keys())]
+            yield select.register_select(
+                setting_var, setting_conf, options=options_list
+            )
+
+            cg.add(var.add_hardware_setting(setting_var))
 
     yield cg.register_component(var, config)
     yield climate.register_climate(var, config)

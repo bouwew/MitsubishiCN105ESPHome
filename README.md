@@ -1,6 +1,6 @@
 # Mitsubishi CN105 ESPHome
 
-> [!WARNING]  
+> [!WARNING]
 > Due to a change in ESPHome 2025.2.0, some users are reporting build problems related to the loading of the `uptime_seconds_sensor` class. If you get a compile error for this reason, manually add an uptime sensor to your YAML configuration as below, clean your build files, and recompile. Once the root cause is identified this note will be removed.
 >
 > ```yaml
@@ -9,14 +9,14 @@
 >     name: Uptime
 > ```
 
-> [!WARNING]  
+> [!WARNING]
 > Due to a change in ESPHome 2025.8.0, some users are facing UART connection issues after a cold boot. Forcing the firmware esphome version to a previous release (2025.7.5 and below) solves the issue (no cold boot required). Alternative is to force ESP32 IDF version to 5.4.0. Note that OTA updates to 2025.8.0+ may work but can break after a subsequent cold boot.
 >
 > _"commit 116c91e9c5fc6d0d32191bd4e6d6e406e2bff6bf Author: Jonathan Swoboda <154711427+swoboda1337@users.noreply.github.com> Date: Tue Jul 22 19:15:31 2025 -0400_
 >
 > _Bump ESP32 IDF version to 5.4.2 and Arduino version to 3.2.1 (#9770)"_
 >
-> [!IMPORTANT]  
+> [!IMPORTANT]
 > Temporary fix included: This component now implements a fallback low-level UART reinitialization that triggers only if the initial (normal) connection fails at boot. It reconfigures the UART controller linked to your `uart:` block (clock source, reapplies baudrate, RX pull-up, flush, etc.). No YAML `on_boot` workaround is required. This aims to mitigate ESP-IDF 5.4.x regressions observed on some ESP32 at low baud (2400, 8E1).
 >
 > If this fallback still doesn’t work on your hardware, you can temporarily force ESP‑IDF 5.4.0 in your YAML:
@@ -190,6 +190,9 @@ If this is the case, you will see logs in the form:
 This will give you a good idea of your microcontroller's performance in completing an entire cycle. It is unnecessary to set the `update_interval` below this value.
 In this example, setting an `update_interval` to 1500ms could be a fine tuned value.
 
+> [!TIP]
+> An `update_interval` between 1s and 4s is recommended, because the underlying process divides this into three separate requests which need time to complete. If some updates get "missed" from your heatpump, consider making this interval longer.
+
 ### Step 5: Optional components and variables
 
 These optional additional configurations add customization and additional capabilities. The examples below assume you have added a substitutions component to your configuration file to allow for easy renaming, and that you have added a `secrets.yaml` file to your ESPHome configuration to hide private variables like your random API keys, OTA passwords, and Wifi passwords.
@@ -208,9 +211,15 @@ The `remote_temperature_timeout` setting allows the unit to revert back to the i
 
 `debounce_delay` adds a small delay to the command processing to account for some HomeAssistant buttons that may send repeat commands too quickly. A shorter value creates a more responsive UI, a longer value protects against repeat commands. (See https://github.com/echavet/MitsubishiCN105ESPHome/issues/21)
 
-`fahrenheit_compatibility` improves compatibility with HomeAssistant installations using Fahrenheit units. Mitsubishi uses a custom lookup table to convert F to C which doesn't correspond to the actual math in all cases. This can result in external thermostats and HomeAssistant "disagreeing" on what the current setpoint is. Setting this value to `true` forces the component to use the same lookup tables, resulting in more consistent display of setpoints. Recommended for Fahrenheit users. (See https://github.com/echavet/MitsubishiCN105ESPHome/pull/298.)
+`connection_bootstrap_delay` delays the initial CN105 UART connection sequence (UART init + CONNECT handshake) **after boot**, to ensure the OTA log stream has time to attach. This is useful when troubleshooting cold-boot issues remotely: without a delay, the very first connection logs can be missed because the log client connects a few seconds after reboot. While this delay is active, the component will **not start communication cycles** until the heatpump replies with the connection success packet.
 
-`use_as_operating_fallback` in the `stage_sensor` is an uncommon option. If your unit doesn't accurately update the activity indicator (idle/heating/cooling/etc.), then this sensor can use the `stage_sensor` as an alternate source of information on the status of the unit. Not recommended for most users. (See https://github.com/echavet/MitsubishiCN105ESPHome/issues/277)
+Recommended: start with `10s` and increase (e.g., `30s`) if you still miss early logs. A safety fallback starts anyway after 120s.
+
+`installer_mode` enables an extended CN105 connection handshake (CONNECT command `0x5B`) instead of the standard handshake (`0x5A`). Some indoor units (notably some ducted SEZ variants) may require this to unlock installer/service privileges so that Function Settings (ISU / `hardware_settings`) return real values instead of `0`. Default is `false` for maximum compatibility.
+
+`fahrenheit_compatibility` improves compatibility with HomeAssistant installations using Fahrenheit units. Mitsubishi uses a custom lookup table to convert F to C which doesn't correspond to the actual math in all cases. This can result in external thermostats and HomeAssistant "disagreeing" on what the current setpoint is. Setting this value to `standard` (or `alt` for alternative conversion tables) forces the component to use the same lookup tables, resulting in more consistent display of setpoints. Recommended for Fahrenheit users. (See https://github.com/echavet/MitsubishiCN105ESPHome/pull/298.)
+
+`use_as_operating_fallback` in the `stage_sensor` enables a fallback mechanism for the activity indicator (idle/heating/cooling/etc.). By default, the activity status is based on the compressor running state. When this option is enabled, the system uses an OR logic: it shows active status if the compressor is running OR if the stage sensor indicates activity (not IDLE). This is particularly useful for 2-stage heating systems where the second stage (e.g., gas heating) may be active while the compressor is off. (See https://github.com/echavet/MitsubishiCN105ESPHome/issues/277 and https://github.com/echavet/MitsubishiCN105ESPHome/issues/469)
 
 ```yaml
 climate:
@@ -225,12 +234,17 @@ climate:
         target_temperature: 1
         current_temperature: 0.5
     # Fahrenheit compatibility mode - uses Mitsubishi's "custom" unit conversions, set to
-    # "true" for better support of Fahrenheit units in HomeAssistant
-    fahrenheit_compatibility: false
+    # "standard" (or "alt") for better support of Fahrenheit units in HomeAssistant.
+    # Options: "disabled" (default), "standard", "alt"
+    fahrenheit_compatibility: "disabled"
     # Timeout and communication settings
     remote_temperature_timeout: 30min
     update_interval: 2s
     debounce_delay: 100ms
+    # Delay the initial UART/CONNECT bootstrap to avoid missing early OTA logs
+    connection_bootstrap_delay: 30s
+    # Optional: use extended CONNECT handshake (0x5B) for installer/service privileges
+    installer_mode: false
     # Various optional sensors, not all sensors are supported by all heatpumps
     compressor_frequency_sensor:
       name: Compressor Frequency
@@ -250,7 +264,7 @@ climate:
       disabled_by_default: true
     stage_sensor:
       name: Stage
-      # use_as_operating_fallback: false     # set to true if your unit doesn't provide activity indicator
+      # use_as_operating_fallback: false     # set to true for 2-stage systems or if activity indicator is unreliable
       entity_category: diagnostic
       disabled_by_default: true
     sub_mode_sensor:
@@ -288,13 +302,46 @@ climate:
       # Defaults to false when omitted
       dual_setpoint: true
       # You can still specify supported modes as before
-      mode: [AUTO, COOL, HEAT, DRY, FAN_ONLY]
+      mode: [HEAT_COOL, COOL, HEAT, DRY, FAN_ONLY]
       fan_mode: [AUTO, QUIET, LOW, MEDIUM, HIGH]
       swing_mode: ["OFF", VERTICAL]
+      # Specify which options to display in horizontal_vane_select dropdown
+      # Defaults to all options: ["←←", "←", "|", "→", "→→", "←→", "SWING", "AIRFLOW CONTROL"]
+      # Example to hide "←→" and "AIRFLOW CONTROL" if not supported by your unit:
+      horizontal_vane_mode: ["←←", "←", "|", "→", "→→", SWING]
 ```
 
-> [!TIP]
-> An `update_interval` between 1s and 4s is recommended, because the underlying process divides this into three separate requests which need time to complete. If some updates get "missed" from your heatpump, consider making this interval longer.
+#### HEAT_COOL Mode and Dual Setpoint
+
+Mitsubishi's AUTO mode is mapped to Home Assistant's `HEAT_COOL` mode. In this mode, the heat pump automatically switches between heating and cooling based on room temperature.
+
+**Important limitation:** Mitsubishi heat pumps only accept a single temperature setpoint via the CN105 protocol. The heat pump manages its own internal hysteresis around that value.
+
+When `dual_setpoint: true` is enabled, Home Assistant displays two temperature sliders (low and high). This component implements a **thermostat-like behavior with deadband** to manage these dual setpoints:
+
+**How it works:**
+
+| Room Temperature                | Heat Pump Setpoint | Behavior                    |
+| ------------------------------- | ------------------ | --------------------------- |
+| Below LOW setpoint              | Set to LOW         | Heat pump heats toward LOW  |
+| Above HIGH setpoint             | Set to HIGH        | Heat pump cools toward HIGH |
+| Between LOW and HIGH (deadband) | Follows room temp  | Heat pump stays idle        |
+
+**Example with setpoints [18°C - 26°C]:**
+
+```
+Room at 22°C → Heat pump set to 22°C → Idle (setpoint = room temp)
+Room drifts to 20°C → Heat pump set to 20°C → Idle
+Room drops to 17°C → Heat pump set to 18°C → Heats toward 18°C
+Room rises to 27°C → Heat pump set to 26°C → Cools toward 26°C
+```
+
+The room temperature can drift naturally within the deadband zone without the heat pump intervening. The heat pump only activates when the temperature crosses the LOW or HIGH boundaries.
+
+> [!NOTE]
+> The deadband algorithm runs automatically whenever the heat pump reports a new temperature reading. This ensures responsive control without manual intervention.
+
+> [!NOTE] > **Transition delay in AUTO mode:** When operating in HEAT_COOL mode, the Mitsubishi heat pump may take several minutes (typically 5-15 minutes) to switch between heating and cooling after a significant temperature change. This is normal behavior - the heat pump uses its own internal logic to decide when to act, and it may remain idle temporarily even when the temperature crosses a setpoint boundary. The setpoint commands are sent immediately by the component, but the heat pump decides when to start operating.
 
 #### Logger granularity
 
@@ -311,6 +358,8 @@ logger:
     WRITE_SETTINGS: INFO
     SETTINGS: INFO
     STATUS: INFO
+    # CN105 connection/bootstrap diagnostics (UART init + CONNECT handshake)
+    CN105_CONN: INFO
     CN105Climate: WARN
     CN105: INFO
     climate: WARN
@@ -353,7 +402,7 @@ This minimal configuration includes the basic components necessary for the firmw
 <details>
 
 <summary>Minimal Configuration</summary>
-  
+
 ```yaml
 esphome:
   name: heatpump-1
@@ -424,13 +473,14 @@ password: !secret wifi_password
 
 # Enable fallback hotspot (captive portal) in case wifi connection fails
 
-ap:
-ssid: "Heatpump Fallback Hotspot"
-password: !secret fallback_password
+  ap:
+    ssid: "Heatpump Fallback Hotspot"
+    password: !secret fallback_password
 
 captive_portal:
 
-````
+```
+
 </details>
 
 ## Example Configuration - Complete
@@ -619,8 +669,9 @@ climate:
         target_temperature: 1
         current_temperature: 0.5
     # Fahrenheit compatibility mode - uses Mitsubishi's "custom" unit conversions, set to
-    # "true" for better support of Fahrenheit units in HomeAssistant
-    fahrenheit_compatibility: false
+    # "standard" (or "alt") for better support of Fahrenheit units in HomeAssistant.
+    # Options: "disabled" (default), "standard", "alt"
+    fahrenheit_compatibility: "disabled"
     # Timeout and communication settings
     remote_temperature_timeout: 30min
     update_interval: 2s
@@ -664,7 +715,7 @@ climate:
       name: Runtime Hours
       entity_category: diagnostic
       disabled_by_default: true
-````
+```
 
 </details>
 
@@ -853,6 +904,143 @@ sensor:
     update_interval: 60s
 ```
 
+## Hardware Settings (Function Settings)
+
+This advanced feature allows you to read and modify the internal "Function Settings" (ISU) of your Mitsubishi unit directly from Home Assistant. These settings control hardware behaviors like auto-restart, temperature sensing location, or static pressure.
+
+> [!NOTE]
+> This feature depends on your unit's compatibility. If your unit returns only zeros, it likely does not support reading/writing function settings via CN105, or it may require installer/service privileges. Try setting `installer_mode: true` if your unit supports Function Settings but reports `0` values (seen on some SEZ units). The component will automatically detect fully-zero responses and disable the polling to save resources.
+> Note that the firmware autor's units do not support theses functions settings. So implementation might not be reliable.
+
+### Configuration
+
+Add the `hardware_settings` block to your configuration. You can choose which codes to expose and customize the labels.
+
+```yaml
+climate:
+  - platform: cn105
+    # ... your existing config ...
+
+    # Configure the update interval for reading settings (default: 24h)
+    # These settings rarely change, so a long interval is recommended.
+    hardware_settings:
+      update_interval: 20s
+      list:
+        # Code 101: Auto Restart
+        - code: 101
+          name: "Auto Restart after Power Failure"
+          icon: "mdi:restart"
+          options:
+            1: "ON (Default)"
+            2: "OFF"
+
+        # Code 102: Temperature Sensing Source
+        # Important for remote temperature control!
+        - code: 102
+          name: "Temperature Source"
+          icon: "mdi:thermometer-check"
+          options:
+            1: "Indoor Unit (Default)"
+            2: "Remote Controller"
+            3: "External (CN105/WiFi)"
+
+        # Code 103: Ventilation / Lossnay interaction
+        - code: 103
+          name: "Ventilation Link"
+          options:
+            1: "None (Default)"
+            2: "With Lossnay"
+            3: "Forced"
+
+        # Code 105: Auto Energy Saving
+        - code: 105
+          name: "Auto Energy Saving"
+          options:
+            1: "ON (Default)"
+            2: "OFF"
+
+        # Code 107: Filter Sign Interval
+        - code: 107
+          name: "Filter Sign Interval"
+          icon: "mdi:air-filter"
+          options:
+            1: "100 Hours (Default)"
+            2: "2500 Hours"
+            3: "No Indication"
+
+        # Code 108: Ceiling Height / Static Pressure
+        - code: 108
+          name: "Ceiling Height Mode"
+          icon: "mdi:arrow-expand-vertical"
+          options:
+            1: "Standard (Default)"
+            2: "High Ceiling"
+            3: "Low Ceiling"
+
+        # Code 109: Number of Air Outlets (Cassette models only)
+        - code: 109
+          name: "Air Outlets"
+          options:
+            1: "4 Directions (Default)"
+            2: "3 Directions"
+            3: "2 Directions"
+
+        # Code 110: Auto Mode Switching Logic
+        - code: 110
+          name: "Auto Mode Logic"
+          icon: "mdi:sync"
+          options:
+            1: "Energy Saving (Default)"
+            2: "Comfort / Performance"
+
+        # Code 111: Vane Setting (for specific models)
+        - code: 111
+          name: "Vane Geometry"
+          options:
+            1: "Standard (Default)"
+            2: "Type 1"
+            3: "Type 2"
+
+        # Code 117: Defrost Control
+        - code: 117
+          name: "Defrost Logic"
+          icon: "mdi:snowflake-melt"
+          options:
+            1: "Standard (Default)"
+            2: "High Humidity / Frequent"
+
+        # Code 124: Heating Temperature Offset
+        - code: 124
+          name: "Heating Offset (+2°C)"
+          options:
+            1: "ON (Default)"
+            2: "OFF"
+
+        # Code 125: Fan behavior during Thermo-OFF (Heating)
+        - code: 125
+          name: "Fan during Thermo-OFF (Heat)"
+          icon: "mdi:fan-off"
+          options:
+            1: "Extra Low (Default)"
+            2: "Stop"
+            3: "Set Speed"
+
+        # Code 127: Fan behavior during Thermo-OFF (Cooling)
+        - code: 127
+          name: "Fan during Thermo-OFF (Cool)"
+          icon: "mdi:fan-off"
+          options:
+            1: "Set Speed (Default)"
+            2: "Stop"
+
+        # Code 128: System Error Display
+        - code: 128
+          name: "Error Display on Remote"
+          options:
+            1: "ON (Default)"
+            2: "OFF"
+
+
 ## Other Implementations
 
 - [esphome-mitsubishiheatpump](https://github.com/geoffdavis/esphome-mitsubishiheatpump) - The original esphome project from which this one is forked.
@@ -869,3 +1057,4 @@ Refer to these for further understanding:
 - [ESPHome's Climate Component Source](https://github.com/esphome/esphome/tree/master/esphome/components/climate)
 
 ---
+```

@@ -1,5 +1,6 @@
 #pragma once
 #include "Globals.h"
+#include "esphome/components/uart/uart.h"
 #include "heatpumpFunctions.h"
 #include "van_orientation_select.h"
 #include "uptime_connection_sensor.h"
@@ -16,13 +17,16 @@
 #include "functions_button.h"
 #include "sub_mode_sensor.h"
 #include "hvac_option_switch.h"
+#include "hardware_setting_select.h"
 #include "localization.h"
 #include "info_request.h"
+#include "request_scheduler.h"
 #include <esphome/components/sensor/sensor.h>
 #include <esphome/components/button/button.h>
 #include <esphome/components/binary_sensor/binary_sensor.h>
 #include "cycle_management.h"
 #include <vector>
+#include <map>
 
 #ifdef USE_ESP32
 #include <mutex>
@@ -33,7 +37,7 @@ namespace esphome {
     void log_info_uint32(const char* tag, const char* msg, uint32_t value, const char* suffix = "");
     void log_debug_uint32(const char* tag, const char* msg, uint32_t value, const char* suffix = "");
 
-    class CN105Climate : public climate::Climate, public Component, public uart::UARTDevice {
+    class CN105Climate : public climate::Climate, public Component, public esphome::uart::UARTDevice {
 
         //friend class VaneOrientationSelect;
 
@@ -42,7 +46,7 @@ namespace esphome {
         CN105Climate(uart::UARTComponent* hw_serial);
 
         void set_vertical_vane_select(VaneOrientationSelect* vertical_vane_select);
-        void set_horizontal_vane_select(VaneOrientationSelect* horizontal_vane_select);
+        void set_horizontal_vane_select(VaneOrientationSelect* horizontal_vane_select, const std::vector<std::string>& options = {});
         void set_airflow_control_select(VaneOrientationSelect* airflow_control_select);
         void set_compressor_frequency_sensor(esphome::sensor::Sensor* compressor_frequency_sensor);
         void set_input_power_sensor(esphome::sensor::Sensor* input_power_sensor);
@@ -52,10 +56,13 @@ namespace esphome {
         void set_isee_sensor(esphome::binary_sensor::BinarySensor* iSee_sensor);
         void set_stage_sensor(esphome::text_sensor::TextSensor* Stage_sensor);
         void set_use_stage_for_operating_status(bool value);
-        void set_use_fahrenheit_support_mode(bool value);
+        void set_use_fahrenheit_support_mode(FahrenheitMode mode);
         void set_air_purifier_switch(HVACOptionSwitch* air_purifier_switch);
         void set_night_mode_switch(HVACOptionSwitch* night_mode_switch);
         void set_circulator_switch(HVACOptionSwitch* circulator_switch);
+
+        void add_hardware_setting(HardwareSettingSelect* setting);
+        void set_hardware_settings_interval(uint32_t interval_ms) { this->hardware_settings_interval_ms_ = interval_ms; }
 
         void set_functions_sensor(esphome::text_sensor::TextSensor* Functions_sensor);
         void set_functions_get_button(FunctionsButton* Button);
@@ -71,7 +78,6 @@ namespace esphome {
         binary_sensor::BinarySensor* iSee_sensor_ = nullptr;
         text_sensor::TextSensor* stage_sensor_{ nullptr }; // to save ref if needed
         bool use_stage_for_operating_status_{ false };
-        bool use_fahrenheit_support_mode_ = false;
         FahrenheitSupport fahrenheitSupport_;
         text_sensor::TextSensor* Functions_sensor_ = nullptr;
         FunctionsButton* Functions_get_button_ = nullptr;
@@ -83,6 +89,8 @@ namespace esphome {
         HVACOptionSwitch* air_purifier_switch_ = nullptr;
         HVACOptionSwitch* night_mode_switch_ = nullptr;
         HVACOptionSwitch* circulator_switch_ = nullptr;
+        std::vector<HardwareSettingSelect*> hardware_settings_;
+        uint32_t hardware_settings_interval_ms_{ 86400000 };  // Default 24h
 
         // The value of the code and value for the functions set.
         int functions_code_;
@@ -95,6 +103,7 @@ namespace esphome {
             nullptr;  // Select to store manual position of vertical swing
         VaneOrientationSelect* horizontal_vane_select_ =
             nullptr;  // Select to store manual position of horizontal swing
+        std::vector<std::string> horizontal_vane_options_strings_;  // Store strings for horizontal vane options
         VaneOrientationSelect* airflow_control_select_ =
             nullptr;
         sensor::Sensor* compressor_frequency_sensor_ =
@@ -148,11 +157,14 @@ namespace esphome {
 
         void sendWantedSettings();
         void sendWantedSettingsDelegate();
+        void checkDeadbandAndSend();
+        float calculateDeadbandSetpoint(float current, float low, float high);
         // Use the temperature from an external sensor. Use
         // set_remote_temp(0) to switch back to the internal sensor.
         void set_remote_temperature(float);
         void sendRemoteTemperature();
         void sendWantedRunStates();
+        float getDeadbandAdjustedTemperature(float remoteTemperature);
 
         void set_remote_temp_timeout(uint32_t timeout);
 
@@ -174,9 +186,31 @@ namespace esphome {
         void controlTemperature();
         float calculateTemperatureSetting(float setting);
         float getTargetTemperatureInCurrentMode();
+        float getTargetTemperature();
+        float getTargetTemperatureLow();
+        float getTargetTemperatureHigh();
+        float getCurrentTemperature();
+        void setTargetTemperature(float temperature);
+        void setTargetTemperatureLow(float temperature);
+        void setTargetTemperatureHigh(float temperature);
+        void setCurrentTemperature(float temperature);
 
         void controlFan();
         void controlSwing();
+        // Bootstrap connexion CN105 en loop() (évite de perdre les tout premiers logs OTA)
+        void maybe_start_connection_();
+
+        // Délai de grâce configurable avant d'envoyer CONNECT (pour laisser le flux OTA s'attacher)
+        void set_connection_bootstrap_delay(uint32_t delay_ms) { this->conn_bootstrap_delay_ms_ = delay_ms; }
+
+        // Mode installateur: utilise un handshake CONNECT étendu (0x5B) au lieu du standard (0x5A)
+        void set_installer_mode(bool mode) {
+            // Mode demandé via YAML
+            this->installer_mode_ = mode;
+            // Mode effectivement utilisé: peut tomber en fallback vers standard si la PAC ignore 0x5B
+            this->installer_mode_effective_ = mode;
+            this->installer_mode_fallback_done_ = false;
+        }
 
         // Configure the climate object with traits that we support.
 
@@ -306,6 +340,7 @@ namespace esphome {
         void setActionIfOperatingTo(climate::ClimateAction action);
         void setActionIfOperatingAndCompressorIsActiveTo(climate::ClimateAction action);
         void hpPacketDebug(uint8_t* packet, unsigned int length, const char* packetDirection);
+        void hpFunctionsDebug(uint8_t* packet, unsigned int length);
 
         void debugSettings(const char* settingName, heatpumpSettings& settings);
         void debugSettings(const char* settingName, wantedHeatpumpSettings& settings);
@@ -341,13 +376,9 @@ namespace esphome {
         cycleManagement loopCycle{};
 
         // Orchestrateur des requêtes INFO
-        std::vector<InfoRequest> info_requests_;
-        int current_request_index_ = -1;
+        RequestScheduler scheduler_;
         void registerInfoRequests();
-        void sendInfoRequest(uint8_t code);
-        void sendNextAfter(uint8_t code);
-        void markResponseSeenFor(uint8_t code);
-        bool processInfoResponse(uint8_t code);
+        void registerHardwareSettingsRequests();
 
 #ifdef USE_ESP32
         std::mutex wantedSettingsMutex;
@@ -413,5 +444,17 @@ namespace esphome {
         int pending_packet_len_ = 0;
         bool pending_check_is_active_ = true;
         bool has_pending_packet_ = false;
+
+        // Bootstrap de connexion (loop)
+        uint32_t boot_ms_ = 0;
+        bool conn_bootstrap_started_ = false;
+        bool conn_wait_logged_ = false;
+        bool conn_grace_logged_ = false;
+        bool conn_timeout_armed_ = false;
+        uint32_t conn_bootstrap_delay_ms_{ 10000 };  // par défaut 10s
+
+        bool installer_mode_{ false };
+        bool installer_mode_effective_{ false };
+        bool installer_mode_fallback_done_{ false };
     };
 }
