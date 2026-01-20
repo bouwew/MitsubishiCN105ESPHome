@@ -75,12 +75,10 @@ class MitsubishiHybridClimate(ClimateEntity):
     def __init__(self, hass: HomeAssistant, name: str, source_entity_id: str, unique_id: str = None) -> None:
         """Initialize the climate device."""
         self._hass = hass
-        self._name = name or source_entity_id
         self._source_entity_id = source_entity_id
         self._source_state = None
-        self._attr_should_poll = False
+        self._name = name or source_entity_id
         self._attr_unique_id = unique_id or f"{source_entity_id}_hybrid"
-
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
@@ -101,16 +99,6 @@ class MitsubishiHybridClimate(ClimateEntity):
         self.async_write_ha_state()
 
     @property
-    def name(self) -> str:
-        """Return the name of the entity."""
-        return self._name
-
-    @property
-    def unique_id(self) -> str:
-        """Return the unique ID of the entity."""
-        return self._attr_unique_id
-
-    @property
     def available(self) -> bool:
         """Return if entity is available."""
         return (
@@ -118,6 +106,11 @@ class MitsubishiHybridClimate(ClimateEntity):
             and self._source_state.state != STATE_UNAVAILABLE
             and self._source_state.state != STATE_UNKNOWN
         )
+
+    @property
+    def name(self) -> str:
+        """Return the name of the entity."""
+        return self._name
 
     @property
     def supported_features(self) -> ClimateEntityFeature:
