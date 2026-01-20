@@ -133,8 +133,8 @@ class MitsubishiHybridClimate(ClimateEntity):
         features = source_features & ~ClimateEntityFeature.TARGET_TEMPERATURE
         features = features & ~ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
 
-        # Dynamically add the flag based on current mode
-        if self.hvac_mode == HVACMode.HEAT_COOL:
+        # Dynamically add the flag based on the presence of dual setpoints
+        if self._source_state.attributes.get("target_temp_low"):
             features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         else:
             features |= ClimateEntityFeature.TARGET_TEMPERATURE
@@ -146,7 +146,7 @@ class MitsubishiHybridClimate(ClimateEntity):
         """Return the unit of measurement."""
         if self._source_state:
             return self._source_state.attributes.get(
-                "unit_of_measurement", UnitOfTemperature.CELSIUS
+                "temperature_unit", UnitOfTemperature.CELSIUS
             )
         return UnitOfTemperature.CELSIUS
 
